@@ -785,6 +785,7 @@ uint32_t oldcrc32 = 0xFFFFFFFF;
 uint32_t oldcrc32MMC3 = 0xFFFFFFFF;
 
 void getMapping() {
+  standaloneCandidateAllowed(false);
   FsFile database;
   char crcStr[9];
 
@@ -840,6 +841,7 @@ void getMapping() {
     }
     if (database.available()) {
       browseDatabase = true;
+      standaloneCandidateAllowed(true);
     } else {
       // File searched until end but nothing found
       println_Msg(FS(FSTRING_EMPTY));
@@ -898,6 +900,7 @@ void readDataLine_NES(FsFile& database, void* e) {
 }
 
 bool selectMapping(FsFile& database) {
+  standaloneError();
   // Select starting letter
   byte myLetter = starting_letter();
 

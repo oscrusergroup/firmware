@@ -803,7 +803,7 @@ void getCartInfo_GBA() {
             uint8_t b = 0;
             while (1) {
               // Check button input
-              b = checkButton();
+              b = standaloneCandidate(2) ? 3 : checkButton();
 
               // Next
               if (b == 1) {

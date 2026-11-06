@@ -165,7 +165,7 @@ void gbSmartMenu() {
       }
     default:
       {
-        asm volatile("  jmp 0");
+        resetArduino();
         break;
       }
   }
@@ -218,7 +218,7 @@ void gbSmartGameOptions() {
       }
     default:
       {
-        asm volatile("  jmp 0");
+        resetArduino();
         break;
       }
   }
