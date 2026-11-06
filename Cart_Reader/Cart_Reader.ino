@@ -58,6 +58,8 @@
 **********************************************************************************/
 
 #include "OSCR.h"
+#include "StandaloneAuto.h"
+#include "BootDumpCursor.h"
 
 /******************************************
    Libraries
@@ -65,7 +67,20 @@
 
 // SD Card
 SdFs sd;
-FsFile myFile;
+// Track the main dump file while AutoDump is running. SdFat still owns I/O.
+class DumpFile : public FsFile {
+ public:
+  using FsFile::operator=;
+  bool close() {
+    const bool track = standaloneFileTracking() && isOpen() && isWritable();
+    const uint32_t size = track ? fileSize() : 0;
+    const bool writeError = track && getWriteError();
+    const bool closed = FsFile::close();
+    if (track) standaloneFileClosed(closed && !writeError ? size : 0);
+    return closed;
+  }
+};
+DumpFile myFile;
 #ifdef ENABLE_GLOBAL_LOG
 FsFile myLog;
 bool dont_log = false;
@@ -322,7 +337,12 @@ byte sdBuffer[512];
 
 // soft reset Arduino: jumps to 0
 // using the watchdog timer would be more elegant but some Mega2560 bootloaders are buggy with it
-void (*resetArduino)(void) __attribute__((noreturn)) = 0;
+void resetArduino(void) __attribute__((noreturn));
+void resetArduino(void) {
+  standaloneSuppressNextBoot();
+  asm volatile("jmp 0");
+  __builtin_unreachable();
+}
 
 // Progressbar
 void draw_progressbar(uint32_t processedsize, uint32_t totalsize);
@@ -634,6 +654,7 @@ boolean compareCRC(const char* database, uint32_t crc32sum, boolean renamerom, i
         } else {
           println_Msg(FS(FSTRING_OK));
         }
+        standaloneVerified();
         return 1;
         break;
       }
@@ -831,7 +852,7 @@ boolean checkCartSelection(FsFile& database, void (*readData)(FsFile&, void*), v
     uint8_t b = 0;
     while (1) {
       // Check button input
-      b = checkButton();
+      b = standaloneCandidate(3) ? 3 : checkButton();
 
       // Next
       if (b == 1) {
@@ -903,6 +924,7 @@ void printInstructions() {
 
 #if (defined(ENABLE_OLED) || defined(ENABLE_LCD))
 int navigateMenu(int min, int max, void (*printSelection)(int)) {
+  standaloneError();
   uint8_t b = 0;
   int i = min;
 
@@ -2482,6 +2504,8 @@ void setup() {
   #endif /* HW5 */
 #endif /* ENABLE_VSELECT */
 
+  standaloneBootCapture();
+
   // Set power to low to protect carts
   setVoltage(VOLTS_SET_3V3);
 
@@ -2632,6 +2656,7 @@ void setup() {
 #endif                           /* ENABLE_3V3FIX */
 
   // Start menu system
+  standaloneBootReady();
   mainMenu();
 }
 
@@ -2736,6 +2761,7 @@ void convertPgm(const char* const pgmOptions[], byte numArrays) {
 }
 
 void _print_Error(void) {
+  standaloneError();
   errorLvl = 1;
   rgbLed(red_color);
   display_Update();
@@ -2775,6 +2801,7 @@ void print_FatalError(byte errorMessage) {
 }
 
 void wait() {
+  if (standaloneWait()) return;
   // Switch status LED off
   statusLED(false);
 #if defined(ENABLE_LCD)
@@ -3234,6 +3261,7 @@ byte questionBox_Serial(const __FlashStringHelper* question, char answers[7][20]
 #if (defined(ENABLE_LCD) || defined(ENABLE_OLED))
 // Display a question box with selectable answers. Make sure default choice is in (0, num_answers]
 unsigned char questionBox_Display(const __FlashStringHelper* question, char answers[7][20], uint8_t num_answers, uint8_t default_choice) {
+redraw:
   //clear the screen
   display.clearDisplay();
   display.updateDisplay();
@@ -3244,7 +3272,7 @@ unsigned char questionBox_Display(const __FlashStringHelper* question, char answ
   rgbLed(default_choice);
 
   // print menu
-  display.println(question);
+  standaloneTitle(question);
   display.setCursor(0, display.ty + 8);
   for (unsigned char i = 0; i < num_answers; i++) {
     // Add space for the selection dot
@@ -3264,9 +3292,31 @@ unsigned char questionBox_Display(const __FlashStringHelper* question, char answ
 
   unsigned long idleTime = millis();
   byte currentColor = 0;
+  bool bootHeaderSelected = false;
+  const bool bootHeaderAvailable = standaloneHeaderSelectable(question);
+  const int8_t automaticChoice = standaloneMenu(question, answers, num_answers);
+  if (automaticChoice == -2) return 0;
+  if (automaticChoice >= 0) {
+    choice = automaticChoice;
+    numPages = 0;
+    goto selected;
+  }
 
   // wait until user makes his choice
   while (1) {
+    if (!bootHeaderSelected && !standaloneInputBlocked() && standaloneRightDown()) {
+      const uint8_t target = standaloneTarget(question, answers[choice], true);
+      if (target) {
+        bool presetChanged = false;
+        const bool canAuto = standaloneTarget(question, answers[choice], false) != 0;
+        if (standaloneHold(target, presetChanged, canAuto)) {
+          numPages = 0;
+          goto selected;
+        }
+        default_choice = choice;
+        goto redraw;
+      }
+    }
     // Attract Mode
     if (millis() - idleTime > 300000) {
       if ((millis() - idleTime) % 4000 == 0) {
@@ -3288,6 +3338,34 @@ unsigned char questionBox_Display(const __FlashStringHelper* question, char answ
       3 hold/press
       4 longHold */
     uint8_t b = checkButton();
+
+    if (bootHeaderAvailable) {
+      const auto action = bootDumpCursorAction(
+          bootHeaderSelected, b, choice, num_answers, currPage <= 1, currPage >= numPages);
+      if (action == BD_DISABLE) {
+        standaloneDisablePreset();
+        default_choice = 0;
+        goto redraw;
+      }
+      if (action != BD_NORMAL) {
+        display.setDrawColor(0);
+        display.drawBox(1, bootHeaderSelected ? 3 : 8 * choice + 11, 3, 3);
+        display.setDrawColor(1);
+        if (action == BD_PREVIOUS_PAGE) {
+          lastPage = currPage;
+          currPage--;
+          break;
+        }
+        bootHeaderSelected = action == BD_HEADER;
+        if (action == BD_FIRST) choice = 0;
+        if (action == BD_LAST) choice = num_answers - 1;
+        display.drawBox(1, bootHeaderSelected ? 3 : 8 * choice + 11, 3, 3);
+        display.updateDisplay();
+        idleTime = millis();
+        checkUpdater();
+        continue;
+      }
+    }
 
     // if button is pressed twice or rotary encoder turned left/counter clockwise
     if (b == 2) {
@@ -3368,6 +3446,7 @@ unsigned char questionBox_Display(const __FlashStringHelper* question, char answ
     checkUpdater();
   }
 
+selected:
   // pass on user choice
   rgbLed(black_color);
 
@@ -3555,6 +3634,7 @@ uint8_t checkButton1() {
 
 // Read button 2
 uint8_t checkButton2() {
+  if (standaloneInputBlocked()) return 0;
   uint8_t event = 0;
 
   // Read the state of the button (PG2)
@@ -3650,7 +3730,7 @@ uint8_t checkButton() {
   encoder.tick();
   int newPos = encoder.getPosition();
   // Read button
-  boolean reading = (PING & (1 << PING2)) >> PING2;
+  boolean reading = standaloneInputBlocked() ? HIGH : ((PING & (1 << PING2)) >> PING2);
 
   // Check if rotary encoder has changed
   if (rotaryPos != newPos) {
