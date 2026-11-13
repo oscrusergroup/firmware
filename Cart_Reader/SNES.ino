@@ -44,7 +44,12 @@ static const char* const menuOptionsSNS[] PROGMEM = { snsMenuItem1, snsMenuItem2
 // SNES menu items
 static const char SnesMenuItem4[] PROGMEM = "Test SRAM";
 static const char SnesMenuItem6[] PROGMEM = "Force cart type";
+#ifdef ENABLE_WOOT
+static const char SnesMenuItem8[] PROGMEM = "WOOT switch";
+static const char* const menuOptionsSNES[] PROGMEM = { FSTRING_READ_ROM, FSTRING_READ_SAVE, FSTRING_WRITE_SAVE, SnesMenuItem4, FSTRING_REFRESH_CART, SnesMenuItem6, SnesMenuItem8, FSTRING_RESET };
+#else
 static const char* const menuOptionsSNES[] PROGMEM = { FSTRING_READ_ROM, FSTRING_READ_SAVE, FSTRING_WRITE_SAVE, SnesMenuItem4, FSTRING_REFRESH_CART, SnesMenuItem6, FSTRING_RESET };
+#endif
 
 // Manual config menu items
 static const char confMenuItem1[] PROGMEM = "Use header info";
@@ -393,8 +398,13 @@ void snesMenu() {
   // create menu with title and 7 options to choose from
   unsigned char mainMenu;
   // Copy menuOptions out of progmem
+#ifdef ENABLE_WOOT
+  convertPgm(menuOptionsSNES, 8);
+  mainMenu = question_box(F("SNES Cart Reader"), menuOptions, 8, 0);
+#else
   convertPgm(menuOptionsSNES, 7);
   mainMenu = question_box(F("SNES Cart Reader"), menuOptions, 7, 0);
+#endif
 
   // wait for user choice to come back from the question box menu
   switch (mainMenu) {
@@ -515,7 +525,17 @@ void snesMenu() {
       display_Update();
       break;
 
+#ifdef ENABLE_WOOT
     case 6:
+      wootMenu();
+      display_Clear();
+      display_Update();
+      break;
+
+    case 7:
+#else
+    case 6:
+#endif
       stopSnesClocks_resetCic_resetCart();
       resetArduino();
       break;
@@ -568,6 +588,276 @@ void confMenuManual() {
       break;
   }
 }
+
+#ifdef ENABLE_WOOT
+/******************************************
+   WOOT multicart switch
+   (16-bit Collection Data East Vol.2)
+   JNNEX/Columbus Circle (2017). This switch
+   is specific to this one cartridge; it is
+   not a generic multicart feature.
+   Replays the cart menu's own launch stub
+   on the bus: JEDEC config program at
+   $8C:8000 plus the $70:0000 latch pulses,
+   then dumps the switched window in the
+   game's own layout (SNES/ROM/WOOTn/).
+ *****************************************/
+static const char wootMenuItem1[] PROGMEM = "Switch sel 0";
+static const char wootMenuItem2[] PROGMEM = "Switch sel 1";
+static const char wootMenuItem3[] PROGMEM = "Switch sel 2";
+static const char wootMenuItem4[] PROGMEM = "Restore config";
+static const char* const menuOptionsWOOT[] PROGMEM = { wootMenuItem1, wootMenuItem2, wootMenuItem3, wootMenuItem4, FSTRING_RESET };
+
+// Menu ROM table $8637: latch bytes [1..3] of each 4-byte entry
+static const byte wootLatchTab[3][3] = { { 0x08, 0x00, 0x0D }, { 0x02, 0x00, 0x0C }, { 0x04, 0x00, 0x08 } };
+// Menu ROM table $864B: front-bank word per selection value
+static const word wootFrontTab[3] = { 0x0000, 0x0000, 0x0010 };
+
+void wootBusWrite() {
+  dataOut();
+  controlOut_SNES();
+}
+void wootBusRead() {
+  dataIn();
+  controlIn_SNES();
+}
+
+// JEDEC sector erase (sector containing $8000 in the given bank).
+// Enter with the bus in write mode; returns in write mode.
+bool wootJedecErase(byte bank) {
+  writeBank_SNES(bank, 0x8000, 0xF0);
+  writeBank_SNES(bank, 0x8AAA, 0xAA);
+  writeBank_SNES(bank, 0x8555, 0x55);
+  writeBank_SNES(bank, 0x8AAA, 0x80);
+  writeBank_SNES(bank, 0x8AAA, 0xAA);
+  writeBank_SNES(bank, 0x8555, 0x55);
+  writeBank_SNES(bank, 0x8000, 0x30);
+  wootBusRead();
+  unsigned long t0 = millis();
+  while (readBank_SNES(bank, 0x8000) != 0xFF) {
+    if (millis() - t0 > 10000) {
+      wootBusWrite();
+      return false;
+    }
+  }
+  wootBusWrite();
+  return true;
+}
+
+// JEDEC byte program with read-back polling. Same bus contract as erase.
+bool wootJedecProgram(byte bank, word addr, byte val) {
+  writeBank_SNES(bank, 0x8000, 0xF0);
+  writeBank_SNES(bank, 0x8AAA, 0xAA);
+  writeBank_SNES(bank, 0x8555, 0x55);
+  writeBank_SNES(bank, 0x8AAA, 0xA0);
+  writeBank_SNES(bank, addr, val);
+  wootBusRead();
+  unsigned long t0 = millis();
+  while (readBank_SNES(bank, addr) != val) {
+    if (millis() - t0 > 2000) {
+      wootBusWrite();
+      return false;
+    }
+  }
+  wootBusWrite();
+  return true;
+}
+
+// Shift bits 0..3 of val into the $70:0000 latch port, then write the
+// remaining (val >> 3) to the strobe address. Bus must be in write mode.
+void wootLatch(byte val, word strobe) {
+  byte a = val;
+  for (byte i = 0; i < 4; i++) {
+    writeBank_SNES(0x70, 0x0000, a);
+    a >>= 1;
+  }
+  writeBank_SNES(0x70, strobe, a);
+}
+
+// Launch-stub stage 1: erase the config sector at $8C:8000 and
+// program the 4 config bytes [v, 0, 0, v]. Bus must be in write mode.
+bool wootProgramConfig(byte v) {
+  if (!wootJedecErase(0x8C)) {
+    return false;
+  }
+  const byte cfg[4] = { v, 0, 0, v };
+  for (byte i = 0; i < 4; i++) {
+    if (!wootJedecProgram(0x8C, 0x8000 + i, cfg[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void wootSwitch(byte sel) {
+  // Snapshot the saved config (steers the stub's branch decisions)
+  wootBusRead();
+  byte cfgNow[4];
+  for (byte i = 0; i < 4; i++) {
+    cfgNow[i] = readBank_SNES(0x8C, 0x8000 + i);
+  }
+  byte bOld = cfgNow[0];
+  word fbOld = (bOld < 3) ? wootFrontTab[bOld] : 0;
+  word fbNew = wootFrontTab[sel];
+
+  display_Clear();
+  println_Msg(F("WOOT switch"));
+  char line[24];
+  snprintf(line, sizeof(line), "Config: %02X %02X %02X %02X", cfgNow[0], cfgNow[1], cfgNow[2], cfgNow[3]);
+  println_Msg(line);
+  snprintf(line, sizeof(line), "Target sel: %u", sel);
+  println_Msg(line);
+  println_Msg(F("Cart must be freshly"));
+  println_Msg(F("powered (default"));
+  println_Msg(F("window). This WRITES"));
+  println_Msg(F("to the cart flash."));
+  println_Msg(F("Press button to start"));
+  display_Update();
+  wait();
+  display_Clear();
+
+  wootBusWrite();
+  // Stage 1: config sector
+  if (!wootProgramConfig(sel)) {
+    wootBusRead();
+    print_Error(F("Config write failed"));
+    return;
+  }
+  // Stages 2+3: only when the previously saved selection has a front
+  // bank (erase that sector, then re-program it with its own contents)
+  if (fbOld != 0) {
+    if (!wootJedecErase((byte)fbOld)) {
+      wootBusRead();
+      print_Error(F("Front erase failed"));
+      return;
+    }
+    wootLatch(0x02, 0x6000);
+    wootLatch(0x00, 0x6000);
+    draw_progressbar(0, 32768);
+    for (word a = 0x8000;; a++) {
+      wootBusRead();
+      byte orig = readBank_SNES((byte)fbOld, a);
+      wootBusWrite();
+      if (!wootJedecProgram((byte)fbOld, a, orig)) {
+        wootBusRead();
+        print_Error(F("Front program failed"));
+        return;
+      }
+      if ((a & 0x3FF) == 0) {
+        draw_progressbar(a - 0x8000, 32768);
+      }
+      if (a == 0xFFFF) {
+        break;
+      }
+    }
+  }
+  // Stage 4: per-byte latch pulses across the new front window,
+  // writing each byte back unchanged
+  writeBank_SNES(fbOld ? (byte)fbOld : 0x8C, 0x8000, 0xF0);
+  draw_progressbar(0, 32768);
+  for (word a = 0x8000;; a++) {
+    wootLatch(0x00, 0x6000);
+    wootBusRead();
+    byte orig = readBank_SNES((byte)fbNew, a);
+    wootBusWrite();
+    wootLatch(0x02, 0x6000);
+    writeBank_SNES((byte)fbNew, a, orig);
+    if ((a & 0x3FF) == 0) {
+      draw_progressbar(a - 0x8000, 32768);
+    }
+    if (a == 0xFFFF) {
+      break;
+    }
+  }
+  wootLatch(0x00, 0x6000);
+  // Main latch: the selection's 3 bytes with their strobes
+  wootLatch(wootLatchTab[sel][0], 0x2000);
+  wootLatch(wootLatchTab[sel][1], 0x4000);
+  wootLatch(wootLatchTab[sel][2], 0x6000);
+  wootBusRead();
+
+  println_Msg(F("Switch done."));
+  println_Msg(F("Dumping ROM..."));
+  display_Update();
+
+  // Dump in the selected game's own layout, so the saved file is
+  // already the finished ROM (no trimming or second read needed):
+  // sel 0 = HiROM 4MB, sel 1 = LoROM 512KB, sel 2 = LoROM 1MB
+  sd.chdir("/");
+  if (sel == 0) {
+    romType = HI;
+    numBanks = 64;
+    sramSize = 64;
+  } else if (sel == 1) {
+    romType = LO;
+    numBanks = 16;
+    sramSize = 256;
+  } else {
+    romType = LO;
+    numBanks = 32;
+    sramSize = 256;
+  }
+  char nameBuf[8];
+  strcpy(nameBuf, "WOOT0");
+  nameBuf[4] = '0' + sel;
+  strcpy(romName, nameBuf);
+  readROM_SNES();
+  println_Msg(F("Saved in SNES/ROM"));
+  display_Update();
+}
+
+void wootRestore() {
+  display_Clear();
+  println_Msg(F("Restore config"));
+  println_Msg(F("Cart must be freshly"));
+  println_Msg(F("powered. Writes the"));
+  println_Msg(F("config back to"));
+  println_Msg(F("[00 00 00 00]."));
+  println_Msg(F("Press button to start"));
+  display_Update();
+  wait();
+  display_Clear();
+  wootBusWrite();
+  bool ok = wootProgramConfig(0);
+  wootBusRead();
+  if (ok) {
+    byte v[4];
+    for (byte i = 0; i < 4; i++) {
+      v[i] = readBank_SNES(0x8C, 0x8000 + i);
+    }
+    if (v[0] == 0 && v[1] == 0 && v[2] == 0 && v[3] == 0) {
+      println_Msg(F("Restored OK"));
+      display_Update();
+      return;
+    }
+  }
+  print_Error(F("Restore failed"));
+}
+
+void wootMenu() {
+  unsigned char subMenu;
+  convertPgm(menuOptionsWOOT, 5);
+  subMenu = question_box(F("WOOT switch"), menuOptions, 5, 0);
+  switch (subMenu) {
+    case 0:
+      wootSwitch(0);
+      break;
+    case 1:
+      wootSwitch(1);
+      break;
+    case 2:
+      wootSwitch(2);
+      break;
+    case 3:
+      wootRestore();
+      break;
+    case 4:
+      stopSnesClocks_resetCic_resetCart();
+      resetArduino();
+      break;
+  }
+}
+#endif
 
 void stopSnesClocks_resetCic_resetCart() {
   DDRG |= (1 << 1);    // Set cicrstPin(PG1) to Output

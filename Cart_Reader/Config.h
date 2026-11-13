@@ -321,6 +321,18 @@
 
 /****/
 
+/* [ 16-bit Collection Data East Vol.2 switch (needs ENABLE_SNES)- ]
+    Enables the "WOOT switch" SNES menu entry: it replays this
+    cartridge's own game-selection switch so each of its three
+    games can be dumped. It is specific to this one cartridge
+    ("16-bit Collection Data East Vol.2", JNNEX/Columbus Circle,
+    2017) and is not a generic multicart feature.
+*/
+
+//#define ENABLE_WOOT
+
+/****/
+
 /* [ Super Nintendo ----------------------------------------------- ]
 */
 
