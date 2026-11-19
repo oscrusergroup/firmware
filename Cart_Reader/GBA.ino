@@ -17,6 +17,7 @@ static const char Menu369Item2[] PROGMEM = "Write 256MB";
 static const char Menu369Item3[] PROGMEM = "Read Offset";
 static const char Menu369Item4[] PROGMEM = "Write Offset";
 static const char* const Options369GBA[] PROGMEM = { Menu369Item1, Menu369Item2, Menu369Item3, Menu369Item4, FSTRING_RESET };
+static bool enableBitswap = false;
 #endif
 
 // Rom menu
@@ -261,7 +262,8 @@ void gbaMenu() {
 
 #if defined(ENABLE_FLASH)
 // Flash GBA Repro
-void GBAReproMenu() {
+void GBAReproMenu(bool bitswap) {
+  enableBitswap = bitswap;
   setup_GBA_Repro();
 
   flashRepro_GBA(0);
@@ -561,12 +563,22 @@ word swapBits(word n, word p1, word p2) {
 
 // Some repros have D0 and D1 switched
 word readWord_GAB(unsigned long myAddress) {
-  word tempWord = swapBits(readWord_GBA(myAddress), 0, 1);
+  word tempWord = (word)0x0;
+  if(enableBitswap) {
+    tempWord = swapBits(readWord_GBA(myAddress), 0, 1);
+  } else {
+    tempWord = readWord_GBA(myAddress);
+  }
+
   return tempWord;
 }
 
 void writeWord_GAB(unsigned long myAddress, word myWord) {
-  writeWord_GBA(myAddress, swapBits(myWord, 0, 1));
+  if(enableBitswap) {
+    writeWord_GBA(myAddress, swapBits(myWord, 0, 1));
+  } else {
+    writeWord_GBA(myAddress, myWord);
+  }
 }
 
 byte readByte_GBA(uint16_t myAddress) {
@@ -2115,24 +2127,34 @@ void idFlashrom_GBA() {
             "nop\n\t"
             "nop\n\t");
 
-    // Read flashrom ID
-    flashid = readWord_GAB(0x2);
-    sprintf(flashid_str, "%04X", flashid);
-
-    // MX29GL128E or MSP55LV128
-    if (flashid == 0x227E) {
-      // MX is 0xC2 and MSP is 0x4 or 0x1
+    if (readWord_GAB(0x20) == 'Q' && readWord_GAB(0x22) == 'R' && readWord_GAB(0x24) == 'Y') {
+      flashid = readWord_GAB(0x2);
+      sprintf(flashid_str, "%04X", flashid);
       romType = (readWord_GAB(0x0) & 0xFF);
-      cartSize = 0x1000000;
+      romType = (readWord_GAB(0x0) & 0xFF);
+      cartSize = pow(2, readWord_GAB(0x27 * 2));
       resetMX29GL128E_GBA();
     } else {
-      println_Msg(F("Error"));
-      println_Msg(FS(FSTRING_EMPTY));
-      println_Msg(F("Unknown Flash"));
-      print_Msg(F("Flash ID: "));
-      println_Msg(flashid_str);
-      println_Msg(FS(FSTRING_EMPTY));
-      print_FatalError(F("Check voltage"));
+      // Read flashrom ID
+      flashid = readWord_GAB(0x2);
+      sprintf(flashid_str, "%04X", flashid);
+
+      // MX29GL128E or MSP55LV128
+      if (flashid == 0x227E) {
+        // MX is 0xC2 and MSP is 0x4 or 0x1
+        romType = (readWord_GAB(0x0) & 0xFF);
+        romType = (readWord_GAB(0x0) & 0xFF);
+        cartSize = 0x1000000;
+        resetMX29GL128E_GBA();
+      } else {
+        println_Msg(F("Error"));
+        println_Msg(FS(FSTRING_EMPTY));
+        println_Msg(F("Unknown Flash"));
+        print_Msg(F("Flash ID: "));
+        println_Msg(flashid_str);
+        println_Msg(FS(FSTRING_EMPTY));
+        print_FatalError(F("Check voltage"));
+      }
     }
   }
 }
@@ -2323,7 +2345,10 @@ void eraseIntel4400_GBA() {
 }
 
 void sectorEraseMSP55LV128_GBA() {
-  unsigned long lastSector = 0xFFFFFF;
+  unsigned long lastSector = cartSize-1;
+  uint32_t processedProgressBar = 0;
+  uint32_t totalProgressBar = (uint32_t)(lastSector);
+  draw_progressbar(0, totalProgressBar);
 
   // Erase 256 sectors with 64kbytes each
   unsigned long currSector;
@@ -2342,11 +2367,16 @@ void sectorEraseMSP55LV128_GBA() {
     }
     // Blink LED
     blinkLED();
+    processedProgressBar += 0x10000;
+    draw_progressbar(processedProgressBar, totalProgressBar);
   }
 }
 
 void sectorEraseMX29GL128E_GBA() {
-  unsigned long lastSector = 0xFFFFFF;
+  unsigned long lastSector = cartSize-1;
+  uint32_t processedProgressBar = 0;
+  uint32_t totalProgressBar = (uint32_t)(lastSector);
+  draw_progressbar(0, totalProgressBar);
 
   // Erase 128 sectors with 128kbytes each
   unsigned long currSector;
@@ -2365,6 +2395,8 @@ void sectorEraseMX29GL128E_GBA() {
     }
     // Blink LED
     blinkLED();
+    processedProgressBar += 0x20000;
+    draw_progressbar(processedProgressBar, totalProgressBar);
   }
 }
 
@@ -2417,6 +2449,10 @@ void writeIntel4000_GBA() {
 }
 
 void writeMSP55LV128_GBA() {
+  uint32_t processedProgressBar = 0;
+  uint32_t totalProgressBar = (uint32_t)(fileSize);
+  draw_progressbar(0, totalProgressBar);
+
   for (unsigned long currSector = 0; currSector < fileSize; currSector += 0x10000) {
     // Blink led
     blinkLED();
@@ -2453,12 +2489,19 @@ void writeMSP55LV128_GBA() {
         while ((statusReg | 0xFF7F) != (currWord | 0xFF7F)) {
           statusReg = readWord_GAB(currSector + currSdBuffer + currWriteBuffer + 30);
         }
+
+        processedProgressBar += 32;
+        draw_progressbar(processedProgressBar, totalProgressBar);
       }
     }
   }
 }
 
 void writeMX29GL128E_GBA() {
+  uint32_t processedProgressBar = 0;
+  uint32_t totalProgressBar = (uint32_t)(fileSize);
+  draw_progressbar(0, totalProgressBar);
+
   for (unsigned long currSector = 0; currSector < fileSize; currSector += 0x20000) {
     // Blink led
     blinkLED();
@@ -2495,6 +2538,9 @@ void writeMX29GL128E_GBA() {
         while ((statusReg | 0xFF7F) != (currWord | 0xFF7F)) {
           statusReg = readWord_GAB(currSector + currSdBuffer + currWriteBuffer + 62);
         }
+
+        processedProgressBar += 64;
+        draw_progressbar(processedProgressBar, totalProgressBar);
       }
     }
   }

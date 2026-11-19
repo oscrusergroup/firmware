@@ -34,8 +34,9 @@ static const char GBFlashItem2[] PROGMEM = "GB CFI Repro";
 static const char GBFlashItem3[] PROGMEM = "GB CFI and Save";
 static const char GBFlashItem4[] PROGMEM = "GB Smart";
 static const char GBFlashItem5[] PROGMEM = "GBA Repro (3V)";
-static const char GBFlashItem6[] PROGMEM = "GBA 369-in-1 (3V)";
-static const char* const menuOptionsGBFlash[] PROGMEM = { GBFlashItem1, GBFlashItem2, GBFlashItem3, GBFlashItem4, GBFlashItem5, GBFlashItem6, FSTRING_RESET };
+static const char GBFlashItem6[] PROGMEM = "GBA Repro (3V) (Bitswap)";
+static const char GBFlashItem7[] PROGMEM = "GBA 369-in-1 (3V)";
+static const char* const menuOptionsGBFlash[] PROGMEM = { GBFlashItem1, GBFlashItem2, GBFlashItem3, GBFlashItem4, GBFlashItem5, GBFlashItem6, GBFlashItem7, FSTRING_RESET };
 
 // 29F MBC selection items
 static const char GBFlashMBCItem1[] PROGMEM = "MBC5";
@@ -169,8 +170,8 @@ void gbxMenu() {
       // create submenu with title and 7 options to choose from
       unsigned char gbFlash;
       // Copy menuOptions out of progmem
-      convertPgm(menuOptionsGBFlash, 7);
-      gbFlash = question_box(F("Select type"), menuOptions, 7, 0);
+      convertPgm(menuOptionsGBFlash, 8);
+      gbFlash = question_box(F("Select type"), menuOptions, 8, 0);
 
       // wait for user choice to come back from the question box menu
       switch (gbFlash) {
@@ -420,15 +421,20 @@ void gbxMenu() {
 
         case 4:
           // Flash GBA Repro
-          GBAReproMenu();
+          GBAReproMenu(false);
           break;
 
         case 5:
+          // Flash GBA Repro (Bitswap)
+          GBAReproMenu(true);
+          break;
+
+        case 6:
           // Read/Write GBA 369-in-1 Repro
           repro369in1Menu();
           break;
 
-        case 6:
+        case 7:
           resetArduino();
           break;
       }
