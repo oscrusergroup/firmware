@@ -399,6 +399,8 @@ uint16_t mapper;
 uint8_t prgsize;
 uint8_t chrsize;
 uint8_t ramsize;
+static char nesSaveTitle[FILENAME_LENGTH - 4];
+static bool nesSaveTitleMatchesCrc;
 
 /******************************************
   Menus
@@ -458,10 +460,6 @@ void nesMenu() {
 
     // Read RAM
     case 2:
-      sd.chdir();
-      sprintf(folder, "NES/SAVE");
-      sd.mkdir(folder, true);
-      sd.chdir(folder);
       readRAM();
       resetROM();
       println_Msg(FS(FSTRING_EMPTY));
@@ -689,6 +687,8 @@ void printPRG(unsigned long myOffset) {
 }
 
 void setDefaultRomName() {
+  nesSaveTitle[0] = '\0';
+  nesSaveTitleMatchesCrc = false;
   romName[0] = 'C';
   romName[1] = 'A';
   romName[2] = 'R';
@@ -697,6 +697,22 @@ void setDefaultRomName() {
 }
 
 void setRomnameFromString(const char* input) {
+  size_t length = strlen(input);
+  if (length >= 4 && strcasecmp(input + length - 4, ".nes") == 0)
+    length -= 4;
+  if (length >= sizeof(nesSaveTitle)) {
+    length = sizeof(nesSaveTitle) - 1;
+    while ((static_cast<uint8_t>(input[length]) & 0xC0) == 0x80)
+      --length;
+  }
+  for (size_t i = 0; i < length; ++i) {
+    char c = input[i];
+    nesSaveTitle[i] = (static_cast<uint8_t>(c) < 32 || strchr("\\/:*?\"<>|", c)) ? '_' : c;
+  }
+  while (length && (nesSaveTitle[length - 1] == ' ' || nesSaveTitle[length - 1] == '.'))
+    --length;
+  nesSaveTitle[length] = '\0';
+
   uint8_t myLength = 0;
   for (uint8_t i = 0; i < 20 && myLength < 15; i++) {
     // Stop at first "(" to remove "(Country)"
@@ -796,6 +812,7 @@ void getMapping() {
     // never reached
   }
 
+  oldcrc32 = oldcrc32MMC3 = 0xFFFFFFFF;
   // Read last 8kb block of PRG ROM and compute CRC32
   // Some mappers (like MMC3) map the last 8KB block of PRG ROM to 0xE000 while 0x8000 can contain random data after bootup
   for (size_t c = 0; c < 8192; c++) {
@@ -860,6 +877,8 @@ void getMapping() {
     struct database_entry entry;
 
     if (checkCartSelection(database, &readDataLine_NES, &entry, &printDataLine_NES, &setRomnameFromString)) {
+      nesSaveTitleMatchesCrc = entry.crc512 != 0xBD7BC39F &&
+                               (entry.crc512 == oldcrc32 || entry.crc512 == oldcrc32MMC3);
       // anything else: select current record
       // Save Mapper
       EEPROM_writeAnything(7, mapper);
@@ -1299,35 +1318,49 @@ void CreateCHRFileInSD() {
   myFile = createNewFile("CHR", "bin");
 }
 
-//createNewFile fails to dump RAM if ROM isn't dumped first
-//void CreateRAMFileInSD() {
-//myFile = createNewFile("RAM", "bin");
-//}
-//Temporary fix
 void CreateRAMFileInSD() {
-  char fileCount[3];
-  strcpy(fileName, "RAM");
-  strcat(fileName, ".sav");
-  for (uint8_t i = 0; i < 100; i++) {
-    if (!sd.exists(fileName)) {
-      myFile = sd.open(fileName, O_RDWR | O_CREAT);
-      break;
+  // Keep the full DB title for saves without changing the ROM naming rules.
+  const char* title = nesSaveTitle;
+  char fallback[40];
+  if (!*title) {
+    constexpr uint32_t blankCrc = 0xBD7BC39F;
+    uint32_t crc = mapper == 4 ? oldcrc32MMC3 : oldcrc32;
+    if (crc == blankCrc || crc == 0xFFFFFFFF)
+      crc = mapper == 4 ? oldcrc32 : oldcrc32MMC3;
+    if (crc != blankCrc && crc != 0xFFFFFFFF) {
+      snprintf(fallback, sizeof(fallback), "CRC_%08lX", crc);
+    } else {
+      snprintf(fallback, sizeof(fallback), "Mapper%03u_PRG%uK_CHR%uK_RAM%uK", mapper, prg, chr, static_cast<unsigned>(ram));
     }
-    sprintf(fileCount, "%02d", i);
-    strcpy(fileName, "RAM.");
-    strcat(fileName, fileCount);
-    strcat(fileName, ".sav");
+    title = fallback;
   }
-  if (!myFile) {
-    rgbLed(red_color);
 
-    display_Clear();
-    println_Msg(F("RAM FILE FAILED!"));
-    display_Update();
-    //print_Error(F("SD Error"), true);
-
-    rgbLed(black_color);
+  snprintf(fileName, FILENAME_LENGTH, "%s.sav", title);
+  sd.chdir("/");
+  EEPROM_readAnything(0, foldern);
+  for (uint8_t attempt = 0; attempt < 100; ++attempt) {
+    snprintf(filePath, FILEPATH_LENGTH, "/NES/SAVE/%s/%d", title, foldern);
+    if (!sd.exists(filePath) && sd.mkdir(filePath, true) && sd.chdir(filePath)) {
+      if (!sd.exists(fileName))
+        myFile = sd.open(fileName, O_RDWR | O_CREAT);
+      if (myFile) {
+        print_STR(saving_to_STR, 0);
+        print_Msg(filePath);
+        println_Msg(F("/..."));
+        display_Update();
+        foldern = (foldern == 32767) ? 0 : foldern + 1;
+        EEPROM_writeAnything(0, foldern);
+        return;
+      }
+      sd.chdir("/");
+    }
+    foldern = (foldern == 32767) ? 0 : foldern + 1;
   }
+
+  rgbLed(red_color);
+  println_Msg(F("RAM FILE FAILED!"));
+  display_Update();
+  rgbLed(black_color);
 }
 
 /******************************************
@@ -4433,6 +4466,45 @@ void readCHR(bool readrom) {
 /******************************************
    RAM Functions
  *****************************************/
+static void writeNesSaveLog(uint32_t saveSize, uint32_t saveCrc) {
+  size_t extension = strlen(fileName) - 4;
+  memcpy(fileName + extension, ".txt", 5);
+  if (!sd.exists(fileName) && myFile.open(fileName, O_WRONLY | O_CREAT)) {
+    myFile.print(F("Game: "));
+    myFile.println(*nesSaveTitle ? nesSaveTitle : "Unknown");
+    myFile.print(F("Identification: "));
+    if (!*nesSaveTitle)
+      myFile.println(F("Mapper settings"));
+    else if (nesSaveTitleMatchesCrc)
+      myFile.println(F("DB CRC match"));
+    else
+      myFile.println(F("Manual DB selection"));
+    myFile.print(F("Mapper: "));
+    myFile.println(mapper);
+    myFile.print(F("Save size: "));
+    myFile.print(saveSize);
+    myFile.println(F(" bytes"));
+    char crcText[9];
+    snprintf(crcText, sizeof(crcText), "%08lX", saveCrc);
+    myFile.print(F("Save CRC32: "));
+    myFile.println(crcText);
+    if (oldcrc32 != 0xBD7BC39F && oldcrc32 != 0xFFFFFFFF) {
+      snprintf(crcText, sizeof(crcText), "%08lX", oldcrc32);
+      myFile.print(F("ROM identification CRC32 ($8000): "));
+      myFile.println(crcText);
+    }
+    if (oldcrc32MMC3 != oldcrc32 && oldcrc32MMC3 != 0xBD7BC39F && oldcrc32MMC3 != 0xFFFFFFFF) {
+      snprintf(crcText, sizeof(crcText), "%08lX", oldcrc32MMC3);
+      myFile.print(F("ROM identification CRC32 ($E000): "));
+      myFile.println(crcText);
+    }
+    myFile.close();
+  } else {
+    println_Msg(F("Could not write save TXT"));
+  }
+  memcpy(fileName + extension, ".sav", 5);
+}
+
 void readRAM() {
   display_Clear();
   display_Update();
@@ -4594,16 +4666,17 @@ void readRAM() {
           break;
       }
       myFile.flush();
+      uint32_t saveSize = myFile.fileSize();
       myFile.close();
 
       println_Msg(F("RAM FILE DUMPED!"));
       println_Msg(FS(FSTRING_EMPTY));
       display_Update();
 
-      if ((mapper == 16) || (mapper == 159))
-        printCRC(fileName, NULL, 0);
-      else
-        printCRC(fileName, NULL, 0);
+      uint32_t saveCrc;
+      printCRC(fileName, &saveCrc, 0, filePath);
+      if (saveSize)
+        writeNesSaveLog(saveSize, saveCrc);
     }
   }
   set_address(0);
