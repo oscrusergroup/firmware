@@ -103,6 +103,7 @@ void gbaMenu() {
         case 4:
           // 512K FLASH
           readFLASH_GBA(1, 65536, 0);
+          resetFLASH_GBA();
           break;
 
         case 5:
@@ -113,6 +114,7 @@ void gbaMenu() {
           switchBank_GBA(0x1);
           setROM_GBA();
           readFLASH_GBA(0, 65536, 65536);
+          resetFLASH_GBA();
           break;
 
         case 6:
@@ -1528,10 +1530,10 @@ void switchBank_GBA(byte bankNum) {
   initOutputFlash_GBA();
 
   // Switch bank command sequence
-  writeByte_GBA(0x5555, 0xAA);
-  writeByte_GBA(0x2AAA, 0x55);
-  writeByte_GBA(0x5555, 0xB0);
-  writeByte_GBA(0x0000, bankNum);
+  writeByteFlash_GBA(0x5555, 0xAA);
+  writeByteFlash_GBA(0x2AAA, 0x55);
+  writeByteFlash_GBA(0x5555, 0xB0);
+  writeByteFlash_GBA(0x0000, bankNum);
 
   // Set CS_FLASH(PH0) high
   PORTH |= (1 << 0);
