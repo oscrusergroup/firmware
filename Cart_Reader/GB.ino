@@ -169,9 +169,8 @@ void gbxMenu() {
     case 2:
       // create submenu with title and 7 options to choose from
       unsigned char gbFlash;
-      // Copy menuOptions out of progmem
-      convertPgm(menuOptionsGBFlash, 8);
-      gbFlash = question_box(F("Select type"), menuOptions, 8, 0);
+      // Terrible bodge to make the menu scroll, shouldn't mess things up?
+      gbFlash = pageMenu(F("Select type"), menuOptionsGBFlash, 8, 0);
 
       // wait for user choice to come back from the question box menu
       switch (gbFlash) {
