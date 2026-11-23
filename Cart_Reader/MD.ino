@@ -501,7 +501,7 @@ void segaCDMenu() {
 
     case 2:
       // Reset
-      asm volatile("  jmp 0");
+      resetArduino();
       break;
   }
   println_Msg(FS(FSTRING_EMPTY));

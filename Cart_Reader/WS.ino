@@ -174,7 +174,7 @@ void wsMenu() {
     default:
       {
         // reset
-        asm volatile("  jmp 0");
+        resetArduino();
         break;
       }
   }
